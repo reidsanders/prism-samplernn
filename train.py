@@ -255,97 +255,97 @@ def main():
         train_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(name='accuracy')
         model.compile(optimizer=opt, loss=compute_loss, metrics=[train_accuracy])
 
-    resume_from = (args.resume_from or latest_checkpoint) if args.resume==True else None
-    initial_epoch = get_initial_epoch(resume_from)
+        resume_from = (args.resume_from or latest_checkpoint) if args.resume==True else None
+        initial_epoch = get_initial_epoch(resume_from)
 
-    # Datasets (training and validation)
-    num_epochs = args.num_epochs-initial_epoch
-    #val_batch_size = min(args.batch_size, len(val_split))
+        # Datasets (training and validation)
+        num_epochs = args.num_epochs-initial_epoch
+        #val_batch_size = min(args.batch_size, len(val_split))
 
-    train_dataset = get_dataset(train_split, num_epochs, args.batch_size, seq_len, overlap,
+        train_dataset = get_dataset(train_split, num_epochs, args.batch_size, seq_len, overlap,
+                                    drop_remainder=True, q_type=q_type, q_levels=q_levels)
+
+        val_dataset = get_dataset(val_split, 1, args.batch_size, seq_len, overlap, shuffle=False,
                                 drop_remainder=True, q_type=q_type, q_levels=q_levels)
 
-    val_dataset = get_dataset(val_split, 1, args.batch_size, seq_len, overlap, shuffle=False,
-                              drop_remainder=True, q_type=q_type, q_levels=q_levels)
+        # This computes subseqs per batch...
+        samples0, _ = librosa.load(train_split[0], sr=None, mono=True)
+        steps_per_batch = int(np.floor(len(samples0) / float(seq_len)))
 
-    # This computes subseqs per batch...
-    samples0, _ = librosa.load(train_split[0], sr=None, mono=True)
-    steps_per_batch = int(np.floor(len(samples0) / float(seq_len)))
+        steps_per_epoch = len(train_split) // args.batch_size * steps_per_batch
 
-    steps_per_epoch = len(train_split) // args.batch_size * steps_per_batch
+        # Arguments passed to the generate function called
+        # by the ModelCheckpointCallback...
+        generation_args = {
+            'generate_dir' : generate_dir,
+            'id' : args.id,
+            'config' : config,
+            'num_seqs' : args.max_generate_per_epoch,
+            'dur' : args.output_file_dur,
+            'sample_rate' : args.sample_rate,
+            'temperature' : args.temperature,
+            'seed' : args.seed,
+            'seed_offset' : args.seed_offset
+        }
 
-    # Arguments passed to the generate function called
-    # by the ModelCheckpointCallback...
-    generation_args = {
-        'generate_dir' : generate_dir,
-        'id' : args.id,
-        'config' : config,
-        'num_seqs' : args.max_generate_per_epoch,
-        'dur' : args.output_file_dur,
-        'sample_rate' : args.sample_rate,
-        'temperature' : args.temperature,
-        'seed' : args.seed,
-        'seed_offset' : args.seed_offset
-    }
+        # Callbacks
+        callbacks = [
+            TrainingStepCallback(
+                model = model,
+                num_epochs = args.num_epochs,
+                steps_per_epoch = steps_per_epoch,
+                steps_per_batch = steps_per_batch,
+                resume_from = resume_from,
+                verbose = args.verbose),
+            ModelCheckpointCallback(
+                dir = rundir,
+                max_to_keep = args.max_checkpoints,
+                generate = args.generate,
+                generation_args = generation_args,
+                filepath = '{0}/model.ckpt-{{epoch}}'.format(rundir),
+                monitor = args.monitor,
+                save_weights_only = True,
+                save_best_only = args.checkpoint_policy.lower()=='best',
+                save_freq = int(args.checkpoint_every * steps_per_epoch)),
+            tf.keras.callbacks.EarlyStopping(
+                monitor = args.monitor,
+                patience = args.early_stopping_patience),
+            tf.keras.callbacks.TensorBoard(
+                log_dir = rundir, update_freq = 20)
+        ]
 
-    # Callbacks
-    callbacks = [
-        TrainingStepCallback(
-            model = model,
-            num_epochs = args.num_epochs,
-            steps_per_epoch = steps_per_epoch,
-            steps_per_batch = steps_per_batch,
-            resume_from = resume_from,
-            verbose = args.verbose),
-        ModelCheckpointCallback(
-            dir = rundir,
-            max_to_keep = args.max_checkpoints,
-            generate = args.generate,
-            generation_args = generation_args,
-            filepath = '{0}/model.ckpt-{{epoch}}'.format(rundir),
-            monitor = args.monitor,
-            save_weights_only = True,
-            save_best_only = args.checkpoint_policy.lower()=='best',
-            save_freq = int(args.checkpoint_every * steps_per_epoch)),
-        tf.keras.callbacks.EarlyStopping(
-            monitor = args.monitor,
-            patience = args.early_stopping_patience),
-        tf.keras.callbacks.TensorBoard(
-            log_dir = rundir, update_freq = 20)
-    ]
+        reduce_lr_after = args.reduce_learning_rate_after
 
-    reduce_lr_after = args.reduce_learning_rate_after
+        if reduce_lr_after and reduce_lr_after > 0:
+            def scheduler(epoch, learning_rate):
+                if epoch < reduce_lr_after:
+                    return learning_rate
+                else:
+                    return learning_rate * tf.math.exp(-0.1)
+            callbacks.append(
+                tf.keras.callbacks.LearningRateScheduler(scheduler)
+            )
 
-    if reduce_lr_after and reduce_lr_after > 0:
-        def scheduler(epoch, learning_rate):
-            if epoch < reduce_lr_after:
-                return learning_rate
-            else:
-                return learning_rate * tf.math.exp(-0.1)
-        callbacks.append(
-            tf.keras.callbacks.LearningRateScheduler(scheduler)
-        )
-
-    # Train
-    init_data = np.random.randint(0, model.q_levels, (model.batch_size, overlap + model.seq_len, 1))
-    model(init_data)
-    try:
-        model.fit(
-            train_dataset,
-            epochs=args.num_epochs,
-            initial_epoch=initial_epoch,
-            steps_per_epoch=steps_per_epoch,
-            shuffle=True,
-            callbacks=callbacks,
-            validation_data=val_dataset,
-            verbose=0,
-            use_multiprocessing=True,
-            workers=multiprocessing.cpu_count(),
-        )
-    except KeyboardInterrupt:
-        print('\n')
-        print('Keyboard interrupt')
-        print()
+        # Train
+        init_data = np.random.randint(0, model.q_levels, (model.batch_size, overlap + model.seq_len, 1))
+        model(init_data)
+        try:
+            model.fit(
+                train_dataset,
+                epochs=args.num_epochs,
+                initial_epoch=initial_epoch,
+                steps_per_epoch=steps_per_epoch,
+                shuffle=True,
+                callbacks=callbacks,
+                validation_data=val_dataset,
+                verbose=0,
+                use_multiprocessing=True,
+                workers=multiprocessing.cpu_count(),
+            )
+        except KeyboardInterrupt:
+            print('\n')
+            print('Keyboard interrupt')
+            print()
 
 
 if __name__ == '__main__':
