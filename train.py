@@ -239,21 +239,20 @@ def main():
         # Create the model
         model = create_model(args.batch_size, config)
 
-    seq_len = model.seq_len
-    overlap = model.big_frame_size
-    q_type = model.q_type
-    q_levels = model.q_levels
+        seq_len = model.seq_len
+        overlap = model.big_frame_size
+        q_type = model.q_type
+        q_levels = model.q_levels
 
-    # Optimizer
-    opt = optimizer_factory[args.optimizer](
-        learning_rate=args.learning_rate,
-        momentum=args.momentum,
-    )
+        # Optimizer
+        opt = optimizer_factory[args.optimizer](
+            learning_rate=args.learning_rate,
+            momentum=args.momentum,
+        )
 
-    # Compile the model
-    compute_loss = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
-    train_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(name='accuracy')
-    with strategy.scope():
+        # Compile the model
+        compute_loss = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+        train_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(name='accuracy')
         model.compile(optimizer=opt, loss=compute_loss, metrics=[train_accuracy])
 
     resume_from = (args.resume_from or latest_checkpoint) if args.resume==True else None
