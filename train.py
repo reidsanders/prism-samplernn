@@ -6,6 +6,7 @@ from datetime import datetime
 import json
 from platform import system
 import logging
+import multiprocessing
 
 # Disable verbose TensorFlow looging...
 # See https://github.com/LucaCappelletti94/silence_tensorflow
@@ -66,6 +67,12 @@ def get_arguments():
              raise argparse.ArgumentTypeError("%s is not positive" % value)
         return val
 
+    def check_positive_float(value):
+        val = float(value)
+        if val <= 0:
+             raise argparse.ArgumentTypeError("%s is not positive" % value)
+        return val
+
     def check_max_checkpoints(value):
         if str(value).upper() != 'NONE':
             return check_positive(value)
@@ -100,7 +107,7 @@ def get_arguments():
                                                         help='Optimizer momentum')
     parser.add_argument('--monitor',                    type=str,            default=TRACKED_METRIC, choices=['loss', 'accuracy', 'val_loss', 'val_accuracy'],
                                                         help='Metric to track during training')
-    parser.add_argument('--checkpoint_every',           type=check_positive, default=CHECKPOINT_EVERY,
+    parser.add_argument('--checkpoint_every',           type=check_positive_float, default=CHECKPOINT_EVERY,
                                                         help='Interval (in epochs) at which to generate a checkpoint file')
     parser.add_argument('--checkpoint_policy',          type=str, default=CHECKPOINT_POLICY, choices=['Always', 'Best'],
                                                         help='Policy for saving checkpoints')
@@ -201,6 +208,12 @@ def get_initial_epoch(ckpt_path):
 def main():
     args = get_arguments()
 
+    # setup tpu training 
+    cluster_resolver = tf.distribute.cluster_resolver.TPUClusterResolver(tpu='local')
+    tf.tpu.experimental.initialize_tpu_system(cluster_resolver)
+    strategy = tf.distribute.TPUStrategy(cluster_resolver)
+
+
     train_split, val_split = get_dataset_filenames_split(
         args.data_dir, args.val_frac, args.batch_size)
 
@@ -221,8 +234,10 @@ def main():
     # Load model configuration
     with open(args.config_file, 'r') as config_file:
         config = json.load(config_file)
-    # Create the model
-    model = create_model(args.batch_size, config)
+
+    with strategy.scope():
+        # Create the model
+        model = create_model(args.batch_size, config)
 
     seq_len = model.seq_len
     overlap = model.big_frame_size
@@ -238,7 +253,8 @@ def main():
     # Compile the model
     compute_loss = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
     train_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(name='accuracy')
-    model.compile(optimizer=opt, loss=compute_loss, metrics=[train_accuracy])
+    with strategy.scope():
+        model.compile(optimizer=opt, loss=compute_loss, metrics=[train_accuracy])
 
     resume_from = (args.resume_from or latest_checkpoint) if args.resume==True else None
     initial_epoch = get_initial_epoch(resume_from)
@@ -291,12 +307,12 @@ def main():
             monitor = args.monitor,
             save_weights_only = True,
             save_best_only = args.checkpoint_policy.lower()=='best',
-            save_freq = args.checkpoint_every * steps_per_epoch),
+            save_freq = int(args.checkpoint_every * steps_per_epoch)),
         tf.keras.callbacks.EarlyStopping(
             monitor = args.monitor,
             patience = args.early_stopping_patience),
         tf.keras.callbacks.TensorBoard(
-            log_dir = rundir, update_freq = 50)
+            log_dir = rundir, update_freq = 20)
     ]
 
     reduce_lr_after = args.reduce_learning_rate_after
@@ -320,10 +336,12 @@ def main():
             epochs=args.num_epochs,
             initial_epoch=initial_epoch,
             steps_per_epoch=steps_per_epoch,
-            shuffle=False,
+            shuffle=True,
             callbacks=callbacks,
             validation_data=val_dataset,
             verbose=0,
+            use_multiprocessing=True,
+            workers=multiprocessing.cpu_count(),
         )
     except KeyboardInterrupt:
         print('\n')
